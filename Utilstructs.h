@@ -2,12 +2,14 @@
 #define BEAVER_BUILDER_UTILSTRUCTS
 
 #include <cstdlib>
+#include <string>
 
 struct vec2 {
 	vec2() : x(0), y(0) { }
 	vec2(unsigned xx, unsigned yy) : x(xx), y(yy) { }
 	vec2(const vec2& c) : x(c.x), y(c.y) { }
 	vec2& operator=(const vec2& c) { x = c.x; y = c.y; return *this; }
+
 	float x;
 	float y;
 };
@@ -55,6 +57,40 @@ struct mat4 {
 	vec4 w;
 };
 
+struct MapData {
+	unsigned tileDims, chunkSize, ntChunk, ppChunk;
+	unsigned mapW, mapH, mapWPix, mapHPix, nTiles, cxSlack, cySlack, maxChunkX, maxChunkY;
+	unsigned nTilesRendered;
+	uvec2 tlc, blc, trc;
+	vec4 vis;
+};
+
+struct SpriteData {
+	SpriteData();
+	SpriteData(std::string file);
+	SpriteData(std::string file, uint16_t fw, uint16_t fh);
+	SpriteData(const SpriteData& sd);
+	SpriteData& operator=(const SpriteData& sd);
+
+	std::string path;
+	uint16_t imgW, imgH;
+	uint16_t frW, frH;
+	unsigned texID;
+	uint16_t binding;
+	uint16_t texOff;
+};
+
+struct TexData {
+	TexData();
+	TexData(unsigned id, uint16_t ww, uint16_t hh, uint16_t f, uint16_t slots);
+	TexData(const TexData& td);
+	TexData& operator=(const TexData& td);
+
+	unsigned texID;
+	uint16_t w, h;
+	uint16_t filled, openSlots;
+};
+
 vec2 operator+(const vec2& l, const vec2& r);
 vec2 operator-(const vec2& l, const vec2& r);
 bool operator==(const vec2& l, const vec2& r);
@@ -63,6 +99,7 @@ uvec2 operator+(const uvec2& l, const uvec2& r);
 uvec2 operator-(const uvec2& l, const uvec2& r);
 bool operator==(const uvec2& l, const uvec2& r);
 bool operator!=(const uvec2& l, const uvec2& r);
+bool operator<(const uvec2& l, const uvec2& r);
 mat4 operator*(const mat4& l, const mat4& r);
 
 #endif

@@ -64,6 +64,33 @@ const vec4& mat4::operator[](std::size_t n) const {
 	return *ret;
 }
 
+SpriteData::SpriteData() : path(""), imgW(0), imgH(0), frW(0), frH(0), texID(0), binding(0), texOff(0) { }
+SpriteData::SpriteData(std::string file) : path(file), imgW(0), imgH(0), frW(0), frH(0), texID(0), binding(0), texOff(0) { }
+SpriteData::SpriteData(std::string file, uint16_t fw, uint16_t fh) : path(file), imgW(0), imgH(0), frW(fw), frH(fh), texID(0), binding(0), texOff(0) { }
+SpriteData::SpriteData(const SpriteData& sd) : path(sd.path), imgW(sd.imgW), imgH(sd.imgH), frW(sd.frW), frH(sd.frH), texID(sd.texID), binding(sd.binding), texOff(sd.texOff) { }
+SpriteData &SpriteData::operator=(const SpriteData& sd) {
+	path = sd.path;
+	imgW = sd.imgW;
+	imgH = sd.imgH;
+	frW = sd.frW;
+	frH = sd.frH;
+	texID = sd.texID;
+	binding = sd.binding;
+	texOff = sd.texOff;
+	return *this;
+}
+
+TexData::TexData() : texID(0), w(0), h(0), filled(0), openSlots(0) { }
+TexData::TexData(unsigned id, uint16_t ww, uint16_t hh, uint16_t f, uint16_t slots) : texID(id), w(ww), h(hh), filled(f), openSlots(slots) { }
+TexData::TexData(const TexData& td) : texID(td.texID), w(td.w), h(td.h), filled(td.filled), openSlots(td.openSlots) { }
+TexData& TexData::operator=(const TexData& td) {
+	texID = td.texID;
+	w = td.w;	h = td.h;
+	filled = td.filled;
+	openSlots = td.openSlots;
+	return *this;
+}
+
 vec2 operator+(const vec2& l, const vec2& r) {
 	vec2 ret = l;
 	ret.x += r.x;	ret.y += r.y;
@@ -102,6 +129,12 @@ bool operator==(const uvec2& l, const uvec2& r) {
 
 bool operator!=(const uvec2& l, const uvec2& r) {
 	return l.x != r.x || l.y != r.y;
+}
+
+bool operator<(const uvec2& l, const uvec2& r) {
+	if (l.x < r.x) return true;
+	if (l.x > r.x) return false;
+	return l.y < r.y;
 }
 
 mat4 operator*(const mat4& l, const mat4& r) {

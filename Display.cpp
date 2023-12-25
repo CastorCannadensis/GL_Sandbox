@@ -4,23 +4,30 @@
 #include <fstream>
 #include "Utilstructs.h"
 #include <cstdlib>
+#include <map>
 #include <CImg.h>
 
 Display::Display(wxWindow* p, const int* attribs) : wxGLCanvas(p, wxID_ANY, attribs, wxPoint(0, 0)),
 													panning(false), lastPos({ 0, 0 }), 
-													viewTrans({ 0, 0 }), viewZoom(1.0), 
-													tileDims(32), chunkSize(16), ntChunk(chunkSize*chunkSize), 
-													ppChunk(chunkSize*tileDims), 
-													mapW(512), mapH(512), mapWPix(mapW * tileDims), 
-													mapHPix(mapH * tileDims), nTiles(mapW * mapH), 
-													nTilesRendered(1),
+													viewTrans({ 0, 0 }), viewZoom(1.0),
 													layer1(nullptr), layer2(nullptr), 
 											        solids(nullptr), context(this) {
-	cxSlack = (mapW % chunkSize > 0) ? chunkSize - (mapW % chunkSize) : 0;
-	cySlack = (mapH % chunkSize > 0) ? chunkSize - (mapH % chunkSize) : 0;
-	maxChunkX = (mapW - 1) / chunkSize;
-	maxChunkY = (mapH - 1) / chunkSize;
-	tlc.x = 2; trc.x = 1;
+	//map data for rendering
+	md.tileDims = 32;
+	md.chunkSize = 16;
+	md.ntChunk = md.chunkSize * md.chunkSize;
+	md.ppChunk = md.chunkSize * md.tileDims;
+	md.mapW = 512;	md.mapH = 512;
+	md.mapWPix = md.mapW * md.tileDims;
+	md.mapHPix = md.mapH * md.tileDims;
+	md.nTiles = md.mapW * md.mapH;
+	md.nTilesRendered = 1;
+	md.cxSlack = (md.mapW % md.chunkSize > 0) ? md.chunkSize - (md.mapW % md.chunkSize) : 0;
+	md.cySlack = (md.mapH % md.chunkSize > 0) ? md.chunkSize - (md.mapH % md.chunkSize) : 0;
+	md.maxChunkX = (md.mapW - 1) / md.chunkSize;
+	md.maxChunkY = (md.mapH - 1) / md.chunkSize;
+	md.tlc.x = 2; md.trc.x = 1;
+	md.vis = vec4(0.0, 0.0, 0.0, 0.0);
 
 	//GL Setup
 	SetCurrent(context);
@@ -45,7 +52,10 @@ Display::Display(wxWindow* p, const int* attribs) : wxGLCanvas(p, wxID_ANY, attr
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glBlendEquation(GL_FUNC_ADD);
 
-	_loadProgram();
+	int v;
+	glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &v);
+	Debug::log("MAX ARRAY TEXTURE LAYERS: " + std::to_string(v));
+	_loadPrograms();
 	_setup();
 	_performanceTest();
 
@@ -67,10 +77,11 @@ Display::~Display() {
 	delete[] layer2;
 	delete[] solids;
 	glDeleteBuffers(NUM_BUFFERS, buffers);
-	glDeleteTextures(NUM_TEXTURES, textures);
+	glDeleteTextures(NUM_BAKEDIN_TEXTURES, textures);
 	glDeleteQueries(31, queries);
-	glDeleteVertexArrays(1, &vao);
-	glDeleteProgram(program);
+	glDeleteVertexArrays(2, vaos);
+	glDeleteProgram(programs[0]);
+	glDeleteProgram(programs[1]);
 }
 
 void Display::_OnRightDown(wxMouseEvent& e) {
@@ -92,8 +103,8 @@ void Display::_OnLeftDown(wxMouseEvent& e) {
 	wPos.x = (sPos.x - viewTrans.x) / viewZoom;
 	wPos.y = (sPos.y - viewTrans.y) / viewZoom;
 
-	if (wPos.x > 0 && wPos.x < mapWPix && wPos.y > 0 && wPos.y < mapHPix) {
-		Debug::log("**Clicked Tile: " + std::to_string(wPos.x / tileDims) + ", " + std::to_string(wPos.y / tileDims));
+	if (wPos.x > 0 && wPos.x < md.mapWPix && wPos.y > 0 && wPos.y < md.mapHPix) {
+		Debug::log("**Clicked Tile: " + std::to_string(wPos.x / md.tileDims) + ", " + std::to_string(wPos.y / md.tileDims));
 	}
 
 	_performanceTest();
@@ -148,8 +159,8 @@ void Display::_OnMousewheel(wxMouseEvent& e) {
 		viewZoom -= 0.25;
 	}
 
-	if (viewZoom >= 5.0 && chunkSize != 8) _setChunkSize(8);
-	else if (viewZoom < 5.0 && viewZoom >= 0.25 && chunkSize != 16) _setChunkSize(16);
+	if (viewZoom >= 5.0 && md.chunkSize != 8) _setChunkSize(8);
+	else if (viewZoom < 5.0 && viewZoom >= 0.25 && md.chunkSize != 16) _setChunkSize(16);
 
 	if (z) {
 		viewTrans.x = -wPos.x * viewZoom + mPos.x;
@@ -184,30 +195,30 @@ void Display::render() {
 	static GLuint fidx = 0;
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	if (vis.z != 0.0)
-		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, 0, nTilesRendered * 2);
+	if (md.vis.z != 0.0)
+		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, 0, md.nTilesRendered * 2);
 	else
-		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, 0, nTilesRendered * 3);
+		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, 0, md.nTilesRendered * 3);
 
 	SwapBuffers();
 }
 
-void Display::_loadProgram() {
+void Display::_loadPrograms() {
 	GLuint vs = _loadShader(GL_VERTEX_SHADER, "vertex.vs");
 	GLuint fs = _loadShader(GL_FRAGMENT_SHADER, "fragment.fs");
 
-	program = glCreateProgram();
-	glAttachShader(program, vs);
-	glAttachShader(program, fs);
-	glLinkProgram(program);
-	glUseProgram(program);
+	programs[0] = glCreateProgram();
+	glAttachShader(programs[0], vs);
+	glAttachShader(programs[0], fs);
+	glLinkProgram(programs[0]);
+	glUseProgram(programs[0]);
 
 	GLint err, logl;
-	glGetProgramiv(program, GL_LINK_STATUS, &err);
+	glGetProgramiv(programs[0], GL_LINK_STATUS, &err);
 	if (err != GL_TRUE) {
-		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logl);
+		glGetProgramiv(programs[0], GL_INFO_LOG_LENGTH, &logl);
 		char* buff = (logl > 0) ? new char[logl] : nullptr;
-		glGetProgramInfoLog(program, logl, NULL, buff);
+		glGetProgramInfoLog(programs[0], logl, NULL, buff);
 
 		Debug::log("ERROR: Rendering program failed to link!");
 		Debug::log("-------------------LINKER INFO LOG:-------------------");
@@ -313,8 +324,8 @@ void Display::_loadTilesheet(std::string f) {
 	//fill big buffer
 	int imW = image.width();
 	int imH = image.height();
-	unsigned wInTiles = imW / tileDims;
-	unsigned hInTiles = imH / tileDims;
+	unsigned wInTiles = imW / md.tileDims;
+	unsigned hInTiles = imH / md.tileDims;
 	unsigned nTiles = wInTiles * hInTiles;
 	GLuint* buff = new GLuint[imW * imH];
 
@@ -324,17 +335,17 @@ void Display::_loadTilesheet(std::string f) {
 		//get index
 		unsigned tileX = (n % wInTiles);
 		unsigned tileY = (n / wInTiles);
-		unsigned xoff = tileX * tileDims;
-		unsigned yoff = tileY * tileDims;
+		unsigned xoff = tileX * md.tileDims;
+		unsigned yoff = tileY * md.tileDims;
 	
 		//load tile into buffer
-		for (int y = yoff; y < yoff + tileDims; ++y) {
-			for (int x = xoff; x < xoff + tileDims; ++x) {
-				int idx = (n * tileDims * tileDims) + ((y-yoff) * tileDims + (x-xoff));
+		for (int y = yoff; y < yoff + md.tileDims; ++y) {
+			for (int x = xoff; x < xoff + md.tileDims; ++x) {
+				int idx = (n * md.tileDims * md.tileDims) + ((y-yoff) * md.tileDims + (x-xoff));
 
 				GLuint pix;
 				uint8_t* p = (uint8_t*)&pix;
-				int invY = yoff + tileDims - 1 - (y - yoff);
+				int invY = yoff + md.tileDims - 1 - (y - yoff);
 				p[0] = image(x, invY, 0, 0);
 				p[1] = image(x, invY, 0, 1);
 				p[2] = image(x, invY, 0, 2);
@@ -354,18 +365,18 @@ void Display::_loadTilesheet(std::string f) {
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-	glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, tileDims, tileDims, 257);
+	glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, md.tileDims, md.tileDims, 257);
 	//user-loaded tiles
 	for (unsigned nt = 0; nt < nTiles; ++nt) {
-		unsigned offset = (nt * tileDims * tileDims);
-		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, nt, tileDims, tileDims, 1,
+		unsigned offset = (nt * md.tileDims * md.tileDims);
+		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, nt, md.tileDims, md.tileDims, 1,
 			GL_RGBA, GL_UNSIGNED_BYTE, buff + offset);
 	}
 	delete[] buff;
 
 	//transparent tile and solid tile
-	GLuint* tbuff = new GLuint[tileDims * tileDims];
-	GLuint* sbuff = new GLuint[tileDims * tileDims];
+	GLuint* tbuff = new GLuint[md.tileDims * md.tileDims];
+	GLuint* sbuff = new GLuint[md.tileDims * md.tileDims];
 	GLuint s; uint8_t* sb = (uint8_t*)&s;
 	GLuint t; uint8_t* tb = (uint8_t*)&t;
 	sb[0] = 255;
@@ -377,13 +388,13 @@ void Display::_loadTilesheet(std::string f) {
 	tb[1] = 0;
 	tb[2] = 0;
 	tb[3] = 0;
-	for (unsigned i = 0; i < tileDims * tileDims; ++i) {
+	for (unsigned i = 0; i < md.tileDims * md.tileDims; ++i) {
 		tbuff[i] = t;
 		sbuff[i] = s;
 	}
-	glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 255, tileDims, tileDims, 1, 
+	glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 255, md.tileDims, md.tileDims, 1, 
 			GL_RGBA, GL_UNSIGNED_BYTE, tbuff);
-	glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 256, tileDims, tileDims, 1, 
+	glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 256, md.tileDims, md.tileDims, 1, 
 			GL_RGBA, GL_UNSIGNED_BYTE, sbuff);
 
 	delete[] tbuff;
@@ -391,13 +402,13 @@ void Display::_loadTilesheet(std::string f) {
 }
 
 void Display::_fillMap() {
-	layer1 = new uint16_t[mapW * mapH];
-	layer2 = new uint16_t[mapW * mapH];
-	solids = new uint16_t[mapW * mapH];
+	layer1 = new uint16_t[md.mapW * md.mapH];
+	layer2 = new uint16_t[md.mapW * md.mapH];
+	solids = new uint16_t[md.mapW * md.mapH];
 
-	for (unsigned y = 0; y < mapH; ++y) {
-		for (unsigned x = 0; x < mapW; ++x) {
-			unsigned idx = y * mapW + x;
+	for (unsigned y = 0; y < md.mapH; ++y) {
+		for (unsigned x = 0; x < md.mapW; ++x) {
+			unsigned idx = y * md.mapW + x;
 			uint16_t val1, val2, val3;
 			uint8_t* val1s = (uint8_t*)&val1;
 			uint8_t* val2s = (uint8_t*)&val2;
@@ -419,10 +430,15 @@ void Display::_fillMap() {
 }
 
 void Display::_setup() {
-	glGenVertexArrays(1, &vao);
-	glBindVertexArray(vao);
+	glGenVertexArrays(2, vaos);
+	glBindVertexArray(vaos[0]);
 	glGenBuffers(NUM_BUFFERS, buffers);
 	glGenQueries(31, queries);
+
+	//texture limit data
+	glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxSimTex);
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexSize);
+	glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxTexLayers);
 
 	//vertex data for quad					  Renders as:
 	vec4 q[4] = { {-0.5, 0.5, 0.0, 1.0},	//0: bottom left
@@ -442,7 +458,7 @@ void Display::_setup() {
 	//map and instanced tile properties buffer
 	_fillMap();
 	glBindBuffer(GL_ARRAY_BUFFER, buffers[TILE_PROPS_BUFFER]);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(uint16_t) * nTiles * 3, NULL, GL_DYNAMIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(uint16_t) * md.nTiles * 3, NULL, GL_DYNAMIC_DRAW);
 
 	glVertexAttribIPointer(1, 1, GL_UNSIGNED_BYTE, sizeof(uint16_t), 0);
 	glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(uint16_t), (GLvoid*)sizeof(uint8_t));
@@ -456,20 +472,20 @@ void Display::_setup() {
 	_loadTilesheet("C:/Game Stuff/Assets/testsheet.png");
 
 	//map data uniform buffer
-	unsigned half = tileDims / 2;
-	vis = { 0.0, 0.0, -2.0, 0.0 };
+	unsigned half = md.tileDims / 2;
+	md.vis = { 0.0, 0.0, -2.0, 0.0 };
 	unsigned xoff = 0; unsigned yoff = 0;
 	unsigned nt = 1;   unsigned mw = 1;
 	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
 	glBufferData(GL_UNIFORM_BUFFER, sizeof(mat4) * 3 + sizeof(unsigned) * 6 + sizeof(vec4) * 2, 
 		NULL, GL_DYNAMIC_DRAW);
 	glBufferSubData(GL_UNIFORM_BUFFER, 192, sizeof(unsigned), &nt);
-	glBufferSubData(GL_UNIFORM_BUFFER, 196, sizeof(unsigned), &tileDims);
+	glBufferSubData(GL_UNIFORM_BUFFER, 196, sizeof(unsigned), &md.tileDims);
 	glBufferSubData(GL_UNIFORM_BUFFER, 200, sizeof(unsigned), &half);
 	glBufferSubData(GL_UNIFORM_BUFFER, 204, sizeof(unsigned), &mw);
 	glBufferSubData(GL_UNIFORM_BUFFER, 208, sizeof(unsigned), &xoff);
 	glBufferSubData(GL_UNIFORM_BUFFER, 212, sizeof(unsigned), &yoff);
-	glBufferSubData(GL_UNIFORM_BUFFER, 224, sizeof(vec4), &vis);
+	glBufferSubData(GL_UNIFORM_BUFFER, 224, sizeof(vec4), &md.vis);
 	_setProjection();
 	_setView();
 
@@ -488,9 +504,9 @@ void Display::_performanceTest() {
 	Debug::log("--------------------PERFORMANCE TEST " + std::to_string(it) + "---------------------------");
 	Debug::log("Translation: " + std::to_string(viewTrans.x) + ", " + std::to_string(viewTrans.y));
 	Debug::log("Scale factor: " + std::to_string(viewZoom));
-	Debug::log("Chunk Size: " + std::to_string(chunkSize));
-	Debug::log("Tiles Rendered per Layer: " + std::to_string(nTilesRendered));
-	Debug::log("Chunks Rendered: " + std::to_string(nTilesRendered / ntChunk));
+	Debug::log("Chunk Size: " + std::to_string(md.chunkSize));
+	Debug::log("Tiles Rendered per Layer: " + std::to_string(md.nTilesRendered));
+	Debug::log("Chunks Rendered: " + std::to_string(md.nTilesRendered / md.ntChunk));
 	Debug::log("Pipeline Latency: " + std::to_string(lat) + "  (" + std::to_string(lat / 1000000) + "ms)");
 
 	for (int i = 2; i < 32; ++i) {
@@ -515,65 +531,59 @@ void Display::_updateChunks() {
 	//get map bounds in view space
 	vec2 tl, bl, tr;
 	tl = viewTrans;
-	bl.x = viewTrans.x;							bl.y = mapHPix * viewZoom + viewTrans.y;
-	tr.x = mapWPix * viewZoom + viewTrans.x;	tr.y = viewTrans.y;
+	bl.x = viewTrans.x;							bl.y = md.mapHPix * viewZoom + viewTrans.y;
+	tr.x = md.mapWPix * viewZoom + viewTrans.x;	tr.y = viewTrans.y;
 	 
 	//no viewport intersection with map, set rendered tiles to 0
 	if (tl.y > disH || bl.y < 0 || tl.x > disW || tr.x < 0) {
-		tlc.x = 2; trc.x = 1;		//set nonsense chunk data to function as null
-		nTilesRendered = 0;
+		md.tlc.x = 2; md.trc.x = 1;		//set nonsense chunk data to function as null
+		md.nTilesRendered = 0;
 		clock.endTimer();
 		return;
 	}
 	//otherwise find active chunks
 	uvec2 tlChunk, blChunk, trChunk;
-	tlChunk.x = (tl.x >= 0) ? 0 : (-tl.x / viewZoom) / ppChunk;
-	tlChunk.y = (tl.y >= 0) ? 0 : (-tl.y / viewZoom) / ppChunk;
-	trChunk.x = (tr.x <= disW) ? maxChunkX : ((disW - viewTrans.x) / viewZoom) / ppChunk;
+	tlChunk.x = (tl.x >= 0) ? 0 : (-tl.x / viewZoom) / md.ppChunk;
+	tlChunk.y = (tl.y >= 0) ? 0 : (-tl.y / viewZoom) / md.ppChunk;
+	trChunk.x = (tr.x <= disW) ? md.maxChunkX : ((disW - viewTrans.x) / viewZoom) / md.ppChunk;
 	trChunk.y = tlChunk.y;
 	blChunk.x = tlChunk.x;
-	blChunk.y = (bl.y <= disH) ? maxChunkY : ((disH - viewTrans.y) / viewZoom) / ppChunk;
+	blChunk.y = (bl.y <= disH) ? md.maxChunkY : ((disH - viewTrans.y) / viewZoom) / md.ppChunk;
 
 	//if this is a new set of chunks, load new data to GPU
-	if (tlChunk == tlc && blChunk == blc && trChunk == trc) {
+	if (tlChunk == md.tlc && blChunk == md.blc && trChunk == md.trc) {
 		double t = clock.endTimer();
 		if (t > 0.003) Debug::log("^^^CHUNKCHECK^^^ Same chunk set determined, time taken: " + std::to_string(t));
 		return;
 	}
-	tlc = tlChunk; blc = blChunk; trc = trChunk;
+	md.tlc = tlChunk; md.blc = blChunk; md.trc = trChunk;
 
-	//Debug::log("********************");
-	//Debug::log("Top Left Chunk: " + std::to_string(tlChunk.x) + ", " + std::to_string(tlChunk.y));
-	//Debug::log("Bottom Left Chunk: " + std::to_string(blChunk.x) + ", " + std::to_string(blChunk.y));
-	//Debug::log("Top Right Chunk: " + std::to_string(trChunk.x) + ", " + std::to_string(trChunk.y));
-	//Debug::log("********************");
-
-	unsigned nch = (blc.y - tlc.y + 1);
-	unsigned ncw = (trc.x - tlc.x + 1);
-	unsigned tw = ncw * chunkSize;
-	unsigned nt = ncw * nch * ntChunk;
-	if (trc.x == maxChunkX) {
-		nt -= cxSlack * nch;
-		tw -= cxSlack;
+	unsigned nch = (md.blc.y - md.tlc.y + 1);
+	unsigned ncw = (md.trc.x - md.tlc.x + 1);
+	unsigned tw = ncw * md.chunkSize;
+	unsigned nt = ncw * nch * md.ntChunk;
+	if (md.trc.x == md.maxChunkX) {
+		nt -= md.cxSlack * nch;
+		tw -= md.cxSlack;
 	}
-	if (blc.y == maxChunkY) {
-		nt -= cySlack * ncw;
+	if (md.blc.y == md.maxChunkY) {
+		nt -= md.cySlack * ncw;
 	}
 	glBindBuffer(GL_ARRAY_BUFFER, buffers[TILE_PROPS_BUFFER]);
 	void* buff = glMapBufferRange(GL_ARRAY_BUFFER, 0, nt * 3 * sizeof(uint16_t), 
 		GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
 
 	uint16_t* ubuff = (uint16_t*)buff;
-	unsigned yLim = blc.y * chunkSize + chunkSize;
-	unsigned xLim = trc.x * chunkSize + chunkSize;
+	unsigned yLim = md.blc.y * md.chunkSize + md.chunkSize;
+	unsigned xLim = md.trc.x * md.chunkSize + md.chunkSize;
 	unsigned lay1Idx = 0; unsigned lay2Idx = nt; unsigned lay3Idx = nt * 2;
-	unsigned y = tlc.y * chunkSize;
-	unsigned x = tlc.x * chunkSize;
-	unsigned yoff = y * tileDims;
-	unsigned xoff = x * tileDims;
-	for (; y < mapH && y < yLim; ++y) {
-		for (x = tlc.x * chunkSize; x < mapW && x < xLim; ++x) {
-			unsigned mapIdx = y * mapW + x;
+	unsigned y = md.tlc.y * md.chunkSize;
+	unsigned x = md.tlc.x * md.chunkSize;
+	unsigned yoff = y * md.tileDims;
+	unsigned xoff = x * md.tileDims;
+	for (; y < md.mapH && y < yLim; ++y) {
+		for (x = md.tlc.x * md.chunkSize; x < md.mapW && x < xLim; ++x) {
+			unsigned mapIdx = y * md.mapW + x;
 			ubuff[lay1Idx] = layer1[mapIdx];
 			ubuff[lay2Idx] = layer2[mapIdx];
 			ubuff[lay3Idx] = solids[mapIdx];
@@ -583,7 +593,7 @@ void Display::_updateChunks() {
 
 	glUnmapBuffer(GL_ARRAY_BUFFER);
 	glBindBuffer(GL_ARRAY_BUFFER, NULL);
-	nTilesRendered = nt;
+	md.nTilesRendered = nt;
 	
 	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
 	glBufferSubData(GL_UNIFORM_BUFFER, 192, sizeof(unsigned), &nt);		
@@ -596,20 +606,20 @@ void Display::_updateChunks() {
 }
 
 void Display::_setChunkSize(unsigned sz) {
-	chunkSize = sz;
-	ntChunk = chunkSize * chunkSize;
-	ppChunk = chunkSize * tileDims;
-	cxSlack = (mapW % chunkSize > 0) ? chunkSize - (mapW % chunkSize) : 0;
-	cySlack = (mapH % chunkSize > 0) ? chunkSize - (mapH % chunkSize) : 0;
-	maxChunkX = (mapW - 1) / chunkSize;
-	maxChunkY = (mapH - 1) / chunkSize;
-	tlc.x = 2; trc.x = 1;
+	md.chunkSize = sz;
+	md.ntChunk = md.chunkSize * md.chunkSize;
+	md.ppChunk = md.chunkSize * md.tileDims;
+	md.cxSlack = (md.mapW % md.chunkSize > 0) ? md.chunkSize - (md.mapW % md.chunkSize) : 0;
+	md.cySlack = (md.mapH % md.chunkSize > 0) ? md.chunkSize - (md.mapH % md.chunkSize) : 0;
+	md.maxChunkX = (md.mapW - 1) / md.chunkSize;
+	md.maxChunkY = (md.mapH - 1) / md.chunkSize;
+	md.tlc.x = 2; md.trc.x = 1;
 }
 
 void Display::_orientTiles(uint8_t orient) {
-	for (int x = 0; x < mapW; ++x) {
-		for (int y = 0; y < mapH; ++y) {
-			int idx = y * mapW + x;
+	for (int x = 0; x < md.mapW; ++x) {
+		for (int y = 0; y < md.mapH; ++y) {
+			int idx = y * md.mapW + x;
 			uint16_t val = layer1[idx];
 			uint16_t val2 = layer2[idx];
 			uint8_t* vals = (uint8_t*)&val;
@@ -622,9 +632,265 @@ void Display::_orientTiles(uint8_t orient) {
 		}
 	}
 
-	int nTiles = mapW * mapH;
+	int nTiles = md.mapW * md.mapH;
 	glBindBuffer(GL_ARRAY_BUFFER, buffers[TILE_PROPS_BUFFER]);
 	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(uint16_t) * nTiles, layer1);
 	glBufferSubData(GL_ARRAY_BUFFER, sizeof(uint16_t) * nTiles, sizeof(uint16_t) * nTiles, layer2);
 	glBindBuffer(GL_ARRAY_BUFFER, NULL);
+}
+
+int Display::_registerImg(std::string file) {
+	int r = 0;
+	if (!_isRegistered(file)) {
+		SpriteData sd(file);
+		imgLoadQueue.push_back(sd);
+		r = 1;
+	}
+
+	return r;
+}
+
+int Display::_registerAnim(std::string file, unsigned fw, unsigned fh) {
+	int r = 0;
+	if (!_isRegistered(file)) {
+		SpriteData sd(file, fw, fh);
+		animLoadQueue.push_back(sd);
+		r = 1;
+	}
+
+	return r;
+}
+
+void Display::_packTextures() {
+	if (imgLoadQueue.size() + animLoadQueue.size() < 1) return;
+
+	//load images into buffers and prep info
+	GLuint** buffers = new GLuint * [imgLoadQueue.size() + animLoadQueue.size()];
+	for (unsigned i = 0; i < animLoadQueue.size(); ++i) {
+		_loadAnim(&animLoadQueue.at(i), &buffers[i]);
+	}
+
+	for (unsigned i = 0; i < imgLoadQueue.size(); ++i) {
+		_loadImage(&imgLoadQueue.at(i), &buffers[i + animLoadQueue.size()]);
+	}
+
+	//determine how much new texture space MUST be allocated, allocate it
+	std::map<uvec2, int> slotsNeeded;
+	for (auto i = animLoadQueue.begin(); i != animLoadQueue.end(); ++i) {
+		uvec2 s(i->frW, i->frH);
+		slotsNeeded[s] += (i->imgW / i->frW) * (i->imgH / i->frH);
+	}
+	for (auto i = imgLoadQueue.begin(); i != imgLoadQueue.end(); ++i) {
+		uvec2 s(i->imgW, i->imgH);
+		slotsNeeded[s] += 1;
+	}
+	for (auto i = spriteTextures.begin(); i != spriteTextures.end(); ++i) {
+		uvec2 s(i->w, i->h);
+		slotsNeeded[s] -= i->openSlots;
+	}
+
+	for (auto i = slotsNeeded.begin(); i != slotsNeeded.end(); ++i) {
+		//allocate more space for this frame size if needed
+		if (i->second <= 0) continue;
+
+		int nFull = i->second / maxTexLayers;
+		int nRem = i->second % maxTexLayers;
+
+		for (int k = 0; k < nFull; ++k) {
+			GLuint t;
+			glGenTextures(1, &t);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+			glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, i->first.x, i->first.y, maxTexLayers);
+			spriteTextures.push_back(TexData(t, i->first.x, i->first.y, 0, maxTexLayers));
+		}
+		if (nRem) {
+			GLuint t;
+			glGenTextures(1, &t);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+			glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, i->first.x, i->first.y, nRem);
+			spriteTextures.push_back(TexData(t, i->first.x, i->first.y, 0, nRem));
+		}
+	}
+	
+	//pack animations
+	for (unsigned anim = 0; anim < animLoadQueue.size(); ++anim) {
+
+		SpriteData sd = animLoadQueue.at(anim);
+		TexData *bestFit = nullptr;
+		unsigned slots = (sd.imgW / sd.frW) * (sd.imgH / sd.frH);
+		for (auto tex = spriteTextures.begin(); tex != spriteTextures.end(); ++tex) {
+			if (tex->w == sd.frW && tex->h == sd.frH && tex->openSlots >= slots) {
+				bestFit = (bestFit) ?
+						  ((tex->openSlots < bestFit->openSlots) ? &(*tex) : bestFit) :
+						  &(*tex);
+			}
+		}
+
+		//allocate new texture if this anim doesn't fit anywhere
+		if (!bestFit) {
+			GLuint tid;
+			glGenTextures(1, &tid);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, tid);
+
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+			glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, sd.frW, sd.frH, slots);
+
+			spriteTextures.push_back(TexData(tid, sd.frW, sd.frH, 0, slots));
+			bestFit = &(spriteTextures.at(spriteTextures.size() - 1));
+		}
+
+		//pack animation
+		glBindTexture(GL_TEXTURE_2D_ARRAY, bestFit->texID);
+		for (unsigned i = 0; i < slots; ++i) {
+			unsigned offset = i * sd.frW * sd.frH;
+			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, bestFit->filled + i, sd.frW, sd.frH, 1,
+				GL_RGBA, GL_UNSIGNED_BYTE, buffers[anim] + offset);
+		}
+		sd.texID = bestFit->texID;
+		sd.texOff = bestFit->filled;
+		bestFit->filled += slots;
+		bestFit->openSlots -= slots;
+		spritesLoaded.push_back(sd);
+	}
+
+	//pack images
+	for (unsigned img = 0; img < imgLoadQueue.size(); ++img) {
+
+		SpriteData sd = imgLoadQueue.at(img);
+		unsigned b = animLoadQueue.size() + img;
+		bool fitFound = false;
+		for (auto tex = spriteTextures.begin(); tex != spriteTextures.end() && !fitFound; ++tex) {
+			//pack in first open slot
+			if (tex->w == sd.imgW && tex->h == sd.imgH && tex->openSlots > 0) {
+				fitFound = true;
+				glBindTexture(GL_TEXTURE_2D_ARRAY, tex->texID);
+				glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, tex->filled, sd.imgW, sd.imgH, 1,
+					GL_RGBA, GL_UNSIGNED_BYTE, buffers[b]);
+				sd.texID = tex->texID;
+				sd.texOff = tex->filled;
+				tex->filled += 1;
+				tex->openSlots -= 1;
+				spritesLoaded.push_back(sd);
+			}
+		}
+	}
+
+	//clear
+	for (unsigned i = 0; i < animLoadQueue.size() + imgLoadQueue.size(); ++i) {
+		if (buffers[i]) delete[] buffers[i];
+	}
+	delete[] buffers;
+	imgLoadQueue.clear();
+	animLoadQueue.clear();
+}
+
+void Display::_loadImage(SpriteData* data, GLuint** buff) {
+	bool loaded = true;
+	cimg_library::CImg<uint8_t> image(data->path.c_str());
+
+	//fill big buffer
+	data->imgW = image.width();
+	data->imgH = image.height();
+	data->frW = data->imgW;
+	data->frH = data->imgH;
+	*buff = new GLuint[data->imgW * data->imgH];
+
+	for (int y = 0; y < data->imgH; ++y) {
+		for (int x = 0; x < data->imgW; ++x) {
+			int idx = y * data->imgW + x;
+
+			GLuint pix;
+			uint8_t* p = (uint8_t*)&pix;
+			int invY = data->imgH - 1 - y;
+			p[0] = image(x, invY, 0, 0);
+			p[1] = image(x, invY, 0, 1);
+			p[2] = image(x, invY, 0, 2);
+			p[3] = (p[0] == 255 && p[1] == 0 && p[2] == 255) ? 0 : 255;
+
+			*buff[idx] = pix;
+		}
+	}
+
+}
+
+void Display::_loadAnim(SpriteData *data, GLuint** buff) {
+	cimg_library::CImg<uint8_t> image(data->path.c_str());
+
+	//fill big buffer
+	data->imgW = image.width();
+	data->imgH = image.height();
+	if (data->imgW % data->frW != 0 || data->imgH % data->frH != 0) {
+		*buff = nullptr;
+		data->imgW = data->imgH = data->frW = data->frH = 0;
+		return;
+	}
+	unsigned wInFrames = (data->imgW / data->frW);
+	unsigned hInFrames = (data->imgH / data->frH);
+	unsigned nFrames = wInFrames * hInFrames;
+	*buff = new GLuint[data->imgW * data->imgH];
+	
+	//for each frame
+	for (int n = 0; n < nFrames; ++n) {
+
+		//get index
+		unsigned frameX = (n % wInFrames);
+		unsigned frameY = (n / wInFrames);
+		unsigned xoff = frameX * data->frW;
+		unsigned yoff = frameY * data->frH;
+
+		//load tile into buffer
+		for (int y = yoff; y < yoff + data->frH; ++y) {
+			for (int x = xoff; x < xoff + data->frW; ++x) {
+				int idx = (n * data->frW * data->frH) + ((y - yoff) * data->frW + (x - xoff));
+
+				GLuint pix;
+				uint8_t* p = (uint8_t*)&pix;
+				int invY = yoff + data->frH - 1 - (y - yoff);
+				p[0] = image(x, invY, 0, 0);
+				p[1] = image(x, invY, 0, 1);
+				p[2] = image(x, invY, 0, 2);
+				p[3] = (p[0] == 255 && p[1] == 0 && p[2] == 255) ? 0 : 255;
+
+				*buff[idx] = pix;
+			}
+		}
+	}
+
+}
+
+bool Display::_isRegistered(std::string file) {
+	bool r = false;
+	for (auto i = imgLoadQueue.begin(); i != imgLoadQueue.end() && !r; ++i) {
+		if (i->path.compare(file) == 0) r = true;
+	}
+	for (auto i = animLoadQueue.begin(); i != animLoadQueue.end() && !r; ++i) {
+		if (i->path.compare(file) == 0) r = true;
+	}
+
+	return r;
+}
+
+bool Display::_isLoaded(std::string file) {
+	bool r = false;
+	for (auto i = spritesLoaded.begin(); i != spritesLoaded.end() && !r; ++i) {
+		if (i->path.compare(file) == 0) r = true;
+	}
+
+	return r;
 }
