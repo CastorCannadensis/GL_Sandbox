@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <map>
 #include <CImg.h>
+#include <algorithm>
 
 Display::Display(wxWindow* p, const int* attribs) : wxGLCanvas(p, wxID_ANY, attribs, wxPoint(0, 0)),
 													panning(false), lastPos({ 0, 0 }), 
@@ -43,7 +44,19 @@ Display::Display(wxWindow* p, const int* attribs) : wxGLCanvas(p, wxID_ANY, attr
 	else {
 		Debug::log("ERROR: GL Version 4.3 Core NOT Supported");
 	}
-
+	if (GLEW_VERSION_4_4) {
+		Debug::log("GL Version 4.4 Core Supported!");
+	}
+	else {
+		Debug::log("SHIT! GL Version 4.4 Core NOT Supported!");
+	}
+	if (GLEW_VERSION_4_5) {
+		Debug::log("GL Version 4.5 Core Supported!");
+	}
+	else {
+		Debug::log("SHIT! GL Version 4.5 Core NOT Supported!");
+	}
+	
 	disW = this->GetSize().GetWidth();
 	disH = this->GetSize().GetHeight();
 	glViewport(0, 0, disW, disH);
@@ -57,7 +70,8 @@ Display::Display(wxWindow* p, const int* attribs) : wxGLCanvas(p, wxID_ANY, attr
 	Debug::log("MAX ARRAY TEXTURE LAYERS: " + std::to_string(v));
 	_loadPrograms();
 	_setup();
-	_performanceTest();
+	//_performanceTest();
+	_spriteLoadingTest();
 
 	//Event Handling
 	this->Bind(wxEVT_RIGHT_DOWN, &Display::_OnRightDown, this);
@@ -76,8 +90,10 @@ Display::~Display() {
 	delete[] layer1;
 	delete[] layer2;
 	delete[] solids;
+
 	glDeleteBuffers(NUM_BUFFERS, buffers);
-	glDeleteTextures(NUM_BAKEDIN_TEXTURES, textures);
+	glDeleteTextures(NUM_TEXTURES, textures);
+	
 	glDeleteQueries(31, queries);
 	glDeleteVertexArrays(2, vaos);
 	glDeleteProgram(programs[0]);
@@ -203,6 +219,42 @@ void Display::render() {
 	SwapBuffers();
 }
 
+int Display::packTextures() {
+	AtlasData old = atlas;
+	int ret = _packTextures();
+
+	//repack with just the previous contents if new pack doesn't fit
+	if (ret == 3) {		
+		_clearLoadQ();
+		for (auto i = spritesLoaded.begin(); i != spritesLoaded.end(); ++i)
+			loadQueue.push_back(*i);
+		spritesLoaded.clear();
+		_allocateAtlas(old.layers, false);
+		ret = _packTextures();
+	}
+
+	//set metadata for atlas and loaded sprites
+	if (ret == 0) {
+		unsigned long totImgBytes = 0;
+		for (auto i = loadQueue.begin(); i != loadQueue.end(); ++i) {
+			totImgBytes += i->imgW * i->imgH * 4;
+			delete[] (i->_pixels);
+			i->_pixels = nullptr;
+			spritesLoaded.push_back(*i);
+		}
+		_clearLoadQ();
+
+		atlas.imgBytes += totImgBytes;
+		atlas.usedBytes = (1024 * 1024 * 4 * atlas.lpos) + (1024 * atlas.ypos * 4);
+		atlas.freeBytes = (1024 * 1024 * 4 * atlas.layers) - atlas.usedBytes;
+
+		std::sort(spritesLoaded.begin(), spritesLoaded.end(), spriteDataCompName);
+	}
+
+	_clearLoadQ();
+	return ret;
+}
+
 void Display::_loadPrograms() {
 	GLuint vs = _loadShader(GL_VERTEX_SHADER, "vertex.vs");
 	GLuint fs = _loadShader(GL_FRAGMENT_SHADER, "fragment.fs");
@@ -290,7 +342,7 @@ void Display::_setProjection() {
 		   {-1.0f, 1.0f, 0.0f, 1.0f}, };		//w	column
 
 	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
-	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(mat4), &proj);
+	glBufferSubData(GL_UNIFORM_BUFFER, 64, sizeof(mat4), &proj);
 	glBindBuffer(GL_UNIFORM_BUFFER, NULL);
 
 	_setViewProj();
@@ -302,10 +354,6 @@ void Display::_setView() {
 		   {0.0f, 0.0f, 1.0f, 0.0f},						//z	column
 		   {viewTrans.x, viewTrans.y, 0.0f, 1.0f}, };	//w	column
 
-	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
-	glBufferSubData(GL_UNIFORM_BUFFER, 64, sizeof(mat4), &view);
-	glBindBuffer(GL_UNIFORM_BUFFER, NULL);
-
 	_setViewProj();
 	_updateChunks();
 }
@@ -314,7 +362,7 @@ void Display::_setViewProj() {
 	mat4 viewproj = proj * view;
 
 	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
-	glBufferSubData(GL_UNIFORM_BUFFER, 128, sizeof(mat4), &viewproj);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(mat4), &viewproj);
 	glBindBuffer(GL_UNIFORM_BUFFER, NULL);
 }
 
@@ -356,7 +404,6 @@ void Display::_loadTilesheet(std::string f) {
 		}
 	}
 	
-	glGenTextures(1, &textures[TILESHEET_TEX]);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D_ARRAY, textures[TILESHEET_TEX]);
 	
@@ -366,12 +413,8 @@ void Display::_loadTilesheet(std::string f) {
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
 	glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, md.tileDims, md.tileDims, 257);
-	//user-loaded tiles
-	for (unsigned nt = 0; nt < nTiles; ++nt) {
-		unsigned offset = (nt * md.tileDims * md.tileDims);
-		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, nt, md.tileDims, md.tileDims, 1,
-			GL_RGBA, GL_UNSIGNED_BYTE, buff + offset);
-	}
+	glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, md.tileDims, md.tileDims, nTiles, 
+		GL_RGBA, GL_UNSIGNED_BYTE, buff);
 	delete[] buff;
 
 	//transparent tile and solid tile
@@ -431,12 +474,12 @@ void Display::_fillMap() {
 
 void Display::_setup() {
 	glGenVertexArrays(2, vaos);
-	glBindVertexArray(vaos[0]);
 	glGenBuffers(NUM_BUFFERS, buffers);
+	glGenTextures(NUM_TEXTURES, textures);
 	glGenQueries(31, queries);
+	glBindVertexArray(vaos[0]);
 
 	//texture limit data
-	glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxSimTex);
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexSize);
 	glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxTexLayers);
 
@@ -477,19 +520,22 @@ void Display::_setup() {
 	unsigned xoff = 0; unsigned yoff = 0;
 	unsigned nt = 1;   unsigned mw = 1;
 	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
-	glBufferData(GL_UNIFORM_BUFFER, sizeof(mat4) * 3 + sizeof(unsigned) * 6 + sizeof(vec4) * 2, 
-		NULL, GL_DYNAMIC_DRAW);
-	glBufferSubData(GL_UNIFORM_BUFFER, 192, sizeof(unsigned), &nt);
-	glBufferSubData(GL_UNIFORM_BUFFER, 196, sizeof(unsigned), &md.tileDims);
-	glBufferSubData(GL_UNIFORM_BUFFER, 200, sizeof(unsigned), &half);
-	glBufferSubData(GL_UNIFORM_BUFFER, 204, sizeof(unsigned), &mw);
-	glBufferSubData(GL_UNIFORM_BUFFER, 208, sizeof(unsigned), &xoff);
-	glBufferSubData(GL_UNIFORM_BUFFER, 212, sizeof(unsigned), &yoff);
-	glBufferSubData(GL_UNIFORM_BUFFER, 224, sizeof(vec4), &md.vis);
-	_setProjection();
+	glBufferData(GL_UNIFORM_BUFFER, 192, NULL, GL_DYNAMIC_DRAW);
+	
+	glBufferSubData(GL_UNIFORM_BUFFER, 128, sizeof(unsigned), &nt);
+	glBufferSubData(GL_UNIFORM_BUFFER, 132, sizeof(unsigned), &md.tileDims);
+	glBufferSubData(GL_UNIFORM_BUFFER, 136, sizeof(unsigned), &half);
+	glBufferSubData(GL_UNIFORM_BUFFER, 140, sizeof(unsigned), &mw);
+	glBufferSubData(GL_UNIFORM_BUFFER, 144, sizeof(unsigned), &xoff);
+	glBufferSubData(GL_UNIFORM_BUFFER, 148, sizeof(unsigned), &yoff);
+	glBufferSubData(GL_UNIFORM_BUFFER, 160, sizeof(vec4), &md.vis);
 	_setView();
+	_setProjection();
 
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, buffers[MAP_PROPS_BUFFER]);
+
+	//Atlas
+	_allocateAtlas(32, false);		//128MB size by default
 }
 
 void Display::_performanceTest() {
@@ -526,6 +572,70 @@ void Display::_performanceTest() {
 	it++;
 }
 
+void Display::_spriteLoadingTest() {
+	
+	_registerSprite("C:/Game Stuff/Assets/guy.png");
+	_registerSprite("C:/Game Stuff/Assets/wizard.png");
+	_registerSprite("C:/Game Stuff/Assets/bigchonk.png");
+	int ret = packTextures();
+
+	if (ret == 0) {
+		Debug::log("### Successfully packed textures!");
+	}
+	else if (ret == 1) {
+		Debug::log("### No textures to pack!");
+	}
+	else if (ret == 2) {
+		Debug::log("### Requested asset pack exceeds image data limits!");
+	}
+	else if (ret == 3) {
+		Debug::log("### Couldn't fit texture data");
+	}
+
+	_debugTexDump();
+}
+
+void Display::_debugTexDump() {
+	Debug::log("##########SPRITE TEXTURE DEBUG DUMP###############");
+
+	Debug::log("\n--Current Sprites--");
+	for (unsigned i = 0; i < spritesLoaded.size(); ++i) {
+		SpriteData sd = spritesLoaded.at(i);
+		Debug::log(std::to_string(i) + ": " + sd.path);
+	}
+	Debug::log("##################################################");
+
+	//print out images of occupied atlas layers
+	if (atlas.imgBytes > 0) {
+		GLuint* buff = new GLuint[1024 * 1024 * atlas.layers];
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, textures[ATLAS_TEX]);
+		glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, buff);
+
+		for (unsigned l = 0; l <= atlas.lpos; ++l) {
+			unsigned offset = 1024 * 1024 * l;
+			_flipImage(buff + offset, 1024, 1024);
+			cimg_library::CImg<uint8_t> img(1024u, 1024u, 1u, 4u);
+			for (unsigned p = 0; p < 1024 * 1024; ++p) {
+				GLuint pix = (buff + offset)[p];
+				uint8_t* bpix = (uint8_t*)&pix;
+				unsigned x = p % 1024;
+				unsigned y = p / 1024;
+
+				img(x, y, 0, 0) = bpix[0];
+				img(x, y, 0, 1) = bpix[1];
+				img(x, y, 0, 2) = bpix[2];
+				img(x, y, 0, 3) = bpix[3];
+			}
+			std::string f = "atlas_" + std::to_string(l) + ".png";
+			img.save(f.c_str());
+		}
+
+		delete[] buff;
+		glBindTexture(GL_TEXTURE_2D_ARRAY, NULL);
+	}
+}
+
 void Display::_updateChunks() {
 	clock.beginTimer();
 	//get map bounds in view space
@@ -550,7 +660,7 @@ void Display::_updateChunks() {
 	blChunk.x = tlChunk.x;
 	blChunk.y = (bl.y <= disH) ? md.maxChunkY : ((disH - viewTrans.y) / viewZoom) / md.ppChunk;
 
-	//if this is a new set of chunks, load new data to GPU
+	//if the active chunks are the current chunks, no action needed
 	if (tlChunk == md.tlc && blChunk == md.blc && trChunk == md.trc) {
 		double t = clock.endTimer();
 		if (t > 0.003) Debug::log("^^^CHUNKCHECK^^^ Same chunk set determined, time taken: " + std::to_string(t));
@@ -558,6 +668,7 @@ void Display::_updateChunks() {
 	}
 	md.tlc = tlChunk; md.blc = blChunk; md.trc = trChunk;
 
+	//otherwise calculate tile bounds
 	unsigned nch = (md.blc.y - md.tlc.y + 1);
 	unsigned ncw = (md.trc.x - md.tlc.x + 1);
 	unsigned tw = ncw * md.chunkSize;
@@ -569,6 +680,8 @@ void Display::_updateChunks() {
 	if (md.blc.y == md.maxChunkY) {
 		nt -= md.cySlack * ncw;
 	}
+
+	//load new data to GPU
 	glBindBuffer(GL_ARRAY_BUFFER, buffers[TILE_PROPS_BUFFER]);
 	void* buff = glMapBufferRange(GL_ARRAY_BUFFER, 0, nt * 3 * sizeof(uint16_t), 
 		GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
@@ -576,11 +689,9 @@ void Display::_updateChunks() {
 	uint16_t* ubuff = (uint16_t*)buff;
 	unsigned yLim = md.blc.y * md.chunkSize + md.chunkSize;
 	unsigned xLim = md.trc.x * md.chunkSize + md.chunkSize;
-	unsigned lay1Idx = 0; unsigned lay2Idx = nt; unsigned lay3Idx = nt * 2;
-	unsigned y = md.tlc.y * md.chunkSize;
-	unsigned x = md.tlc.x * md.chunkSize;
-	unsigned yoff = y * md.tileDims;
-	unsigned xoff = x * md.tileDims;
+	unsigned lay1Idx = 0, lay2Idx = nt, lay3Idx = nt * 2;
+	unsigned y = md.tlc.y * md.chunkSize, yoff = y * md.tileDims;
+	unsigned x = md.tlc.x * md.chunkSize, xoff = x * md.tileDims;
 	for (; y < md.mapH && y < yLim; ++y) {
 		for (x = md.tlc.x * md.chunkSize; x < md.mapW && x < xLim; ++x) {
 			unsigned mapIdx = y * md.mapW + x;
@@ -596,10 +707,10 @@ void Display::_updateChunks() {
 	md.nTilesRendered = nt;
 	
 	glBindBuffer(GL_UNIFORM_BUFFER, buffers[MAP_PROPS_BUFFER]);
-	glBufferSubData(GL_UNIFORM_BUFFER, 192, sizeof(unsigned), &nt);		
-	glBufferSubData(GL_UNIFORM_BUFFER, 204, sizeof(unsigned), &tw);		
-	glBufferSubData(GL_UNIFORM_BUFFER, 208, sizeof(unsigned), &xoff);
-	glBufferSubData(GL_UNIFORM_BUFFER, 212, sizeof(unsigned), &yoff);
+	glBufferSubData(GL_UNIFORM_BUFFER, 128, sizeof(unsigned), &nt);		
+	glBufferSubData(GL_UNIFORM_BUFFER, 140, sizeof(unsigned), &tw);		
+	glBufferSubData(GL_UNIFORM_BUFFER, 144, sizeof(unsigned), &xoff);
+	glBufferSubData(GL_UNIFORM_BUFFER, 148, sizeof(unsigned), &yoff);
 
 	double t = clock.endTimer();
 	if (t > 0.8) Debug::log("^^^CHUNKCHECK^^^ New chunks loaded, time taken: " + std::to_string(t));
@@ -616,200 +727,161 @@ void Display::_setChunkSize(unsigned sz) {
 	md.tlc.x = 2; md.trc.x = 1;
 }
 
-void Display::_orientTiles(uint8_t orient) {
-	for (int x = 0; x < md.mapW; ++x) {
-		for (int y = 0; y < md.mapH; ++y) {
-			int idx = y * md.mapW + x;
-			uint16_t val = layer1[idx];
-			uint16_t val2 = layer2[idx];
-			uint8_t* vals = (uint8_t*)&val;
-			uint8_t* val2s = (uint8_t*)&val2;
-			vals[1] = orient;
-			val2s[1] = orient;
+/*Returns:
+* 0 = success
+* 1 = requested data preservation, but also smaller size
+* 2 = out of memory */
+int Display::_allocateAtlas(unsigned layers, bool preserve) {
+	AtlasData old = atlas;
+	AtlasData nw; atlas = nw;
+	if (layers > 256) layers = 256;
+	if (old.layers == layers && preserve) return 0;
+	if (preserve && layers < old.layers) return 1;
 
-			layer1[idx] = val;
-			layer2[idx] = val2;
-		}
+	//copy old atlas data before reallocation
+	GLuint* buff = nullptr;
+	if (old.imgBytes > 0 && preserve) {
+		buff = new GLuint[old.layers * 1024 * 1024];
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, textures[ATLAS_TEX]);
+		glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, buff);
 	}
 
-	int nTiles = md.mapW * md.mapH;
-	glBindBuffer(GL_ARRAY_BUFFER, buffers[TILE_PROPS_BUFFER]);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(uint16_t) * nTiles, layer1);
-	glBufferSubData(GL_ARRAY_BUFFER, sizeof(uint16_t) * nTiles, sizeof(uint16_t) * nTiles, layer2);
-	glBindBuffer(GL_ARRAY_BUFFER, NULL);
-}
+	//allocation
+	glDeleteTextures(1, &(textures[ATLAS_TEX]));
+	glGenTextures(1, &(textures[ATLAS_TEX]));
 
-int Display::_registerImg(std::string file) {
-	int r = 0;
-	if (!_isRegistered(file)) {
-		SpriteData sd(file);
-		imgLoadQueue.push_back(sd);
-		r = 1;
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, textures[ATLAS_TEX]);
+	while (glGetError() != GL_NO_ERROR) {}
+
+	glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, 1024, 1024, layers);	
+
+	GLenum err = glGetError();
+	if (err == GL_INVALID_OPERATION || err == GL_OUT_OF_MEMORY) {
+		Debug::log("ERROR: CANNOT ALLOCATE " + std::to_string(layers * 4) + "MB OF ATLAS MEMORY");
+		delete[] buff; buff = nullptr;
+		return 2;
 	}
 
-	return r;
+	//setup
+	atlas.freeBytes = (1024 * 1024 * 4 * layers);
+	atlas.layers = layers;
+
+	if (buff) {
+		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1024, 1024, old.layers, GL_RGBA, GL_UNSIGNED_BYTE, buff);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, NULL);
+		delete[] buff; buff = nullptr;
+
+		atlas.imgBytes = old.imgBytes;
+		atlas.usedBytes = old.usedBytes;
+		atlas.freeBytes -= old.usedBytes;
+		atlas.ypos = old.ypos;
+		atlas.lpos = old.lpos;
+	}
+
+	return 0;
 }
 
-int Display::_registerAnim(std::string file, unsigned fw, unsigned fh) {
+int Display::_registerSprite(std::string file, uint16_t fw, uint16_t fh) {
 	int r = 0;
-	if (!_isRegistered(file)) {
+	if (!_isRegistered(file) && !_isLoaded(file)) {
 		SpriteData sd(file, fw, fh);
-		animLoadQueue.push_back(sd);
+		loadQueue.push_back(sd);
 		r = 1;
 	}
 
 	return r;
 }
 
-void Display::_packTextures() {
-	if (imgLoadQueue.size() + animLoadQueue.size() < 1) return;
+/*Returns:
+* 0 = success
+* 1 = load queue empty
+* 2 = image data limit exceeded
+* 3 = max atlas size reached, possible repack needed */
+int Display::_packTextures() {
+	if (loadQueue.size() < 1) return 1;
 
 	//load images into buffers and prep info
-	GLuint** buffers = new GLuint * [imgLoadQueue.size() + animLoadQueue.size()];
-	for (unsigned i = 0; i < animLoadQueue.size(); ++i) {
-		_loadAnim(&animLoadQueue.at(i), &buffers[i]);
+	unsigned sz = loadQueue.size();
+	unsigned long totImgBytes = 0;
+	for (unsigned i = 0; i < sz; ++i) {
+		SpriteData& sd = loadQueue.at(i);
+		_loadSprite(&sd);
+		totImgBytes += sd.imgW * sd.imgH * 4;
 	}
 
-	for (unsigned i = 0; i < imgLoadQueue.size(); ++i) {
-		_loadImage(&imgLoadQueue.at(i), &buffers[i + animLoadQueue.size()]);
+	//if image data size is too much, abort
+	if (totImgBytes > atlas.maxBytes || totImgBytes + atlas.imgBytes > atlas.maxBytes) {
+		Debug::log("ERROR: Texture data limit exceeded");
+		return 2;
 	}
 
-	//determine how much new texture space MUST be allocated, allocate it
-	std::map<uvec2, int> slotsNeeded;
-	for (auto i = animLoadQueue.begin(); i != animLoadQueue.end(); ++i) {
-		uvec2 s(i->frW, i->frH);
-		slotsNeeded[s] += (i->imgW / i->frW) * (i->imgH / i->frH);
-	}
-	for (auto i = imgLoadQueue.begin(); i != imgLoadQueue.end(); ++i) {
-		uvec2 s(i->imgW, i->imgH);
-		slotsNeeded[s] += 1;
-	}
-	for (auto i = spriteTextures.begin(); i != spriteTextures.end(); ++i) {
-		uvec2 s(i->w, i->h);
-		slotsNeeded[s] -= i->openSlots;
+	//make sure enough atlas space is allocated
+	if (totImgBytes > atlas.freeBytes) {
+		long double rem = (long double)totImgBytes - (long double)(atlas.freeBytes);
+		double chunks = std::ceil((rem / (1024.0l * 1024.0l * 128.0l)));
+		_allocateAtlas(atlas.layers + 32 * chunks, true);
 	}
 
-	for (auto i = slotsNeeded.begin(); i != slotsNeeded.end(); ++i) {
-		//allocate more space for this frame size if needed
-		if (i->second <= 0) continue;
-
-		int nFull = i->second / maxTexLayers;
-		int nRem = i->second % maxTexLayers;
-
-		for (int k = 0; k < nFull; ++k) {
-			GLuint t;
-			glGenTextures(1, &t);
-			glBindTexture(GL_TEXTURE_2D_ARRAY, t);
-
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-			glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, i->first.x, i->first.y, maxTexLayers);
-			spriteTextures.push_back(TexData(t, i->first.x, i->first.y, 0, maxTexLayers));
-		}
-		if (nRem) {
-			GLuint t;
-			glGenTextures(1, &t);
-			glBindTexture(GL_TEXTURE_2D_ARRAY, t);
-
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-			glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, i->first.x, i->first.y, nRem);
-			spriteTextures.push_back(TexData(t, i->first.x, i->first.y, 0, nRem));
-		}
-	}
+	//sort by descending height, pack
+	std::sort(loadQueue.begin(), loadQueue.end(), spriteDataCompH);
 	
-	//pack animations
-	for (unsigned anim = 0; anim < animLoadQueue.size(); ++anim) {
-
-		SpriteData sd = animLoadQueue.at(anim);
-		TexData *bestFit = nullptr;
-		unsigned slots = (sd.imgW / sd.frW) * (sd.imgH / sd.frH);
-		for (auto tex = spriteTextures.begin(); tex != spriteTextures.end(); ++tex) {
-			if (tex->w == sd.frW && tex->h == sd.frH && tex->openSlots >= slots) {
-				bestFit = (bestFit) ?
-						  ((tex->openSlots < bestFit->openSlots) ? &(*tex) : bestFit) :
-						  &(*tex);
-			}
+	unsigned xpos = 0;
+	unsigned rowHeight = loadQueue.at(0).imgH;
+	unsigned long bytesPacked = 0;
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, textures[ATLAS_TEX]);
+	for (unsigned i = 0; i < loadQueue.size(); ++i) {
+		SpriteData& sd = loadQueue.at(i);
+		//check contraints
+		if (xpos + sd.imgW > 1024) {
+			atlas.ypos += rowHeight;
+			xpos = 0;
+			rowHeight = sd.imgH;
+		}
+		if (atlas.ypos + rowHeight > 1024) {
+			xpos = 0;
+			atlas.ypos = 0;
+			atlas.lpos += 1;
+			if (atlas.lpos == 256)		   return 3;
+			if (atlas.lpos > atlas.layers) _allocateAtlas(atlas.layers + 32, true);
 		}
 
-		//allocate new texture if this anim doesn't fit anywhere
-		if (!bestFit) {
-			GLuint tid;
-			glGenTextures(1, &tid);
-			glBindTexture(GL_TEXTURE_2D_ARRAY, tid);
+		//pack if able
+		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, xpos, atlas.ypos, atlas.lpos, sd.imgW, sd.imgH,
+			1, GL_RGBA, GL_UNSIGNED_BYTE, sd._pixels);
 
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		sd.yoff = atlas.ypos;
+		sd.xoff = xpos;
+		sd.layer = atlas.lpos;
 
-			glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, sd.frW, sd.frH, slots);
-
-			spriteTextures.push_back(TexData(tid, sd.frW, sd.frH, 0, slots));
-			bestFit = &(spriteTextures.at(spriteTextures.size() - 1));
-		}
-
-		//pack animation
-		glBindTexture(GL_TEXTURE_2D_ARRAY, bestFit->texID);
-		for (unsigned i = 0; i < slots; ++i) {
-			unsigned offset = i * sd.frW * sd.frH;
-			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, bestFit->filled + i, sd.frW, sd.frH, 1,
-				GL_RGBA, GL_UNSIGNED_BYTE, buffers[anim] + offset);
-		}
-		sd.texID = bestFit->texID;
-		sd.texOff = bestFit->filled;
-		bestFit->filled += slots;
-		bestFit->openSlots -= slots;
-		spritesLoaded.push_back(sd);
+		xpos += sd.imgW;
 	}
+	atlas.ypos += rowHeight;
 
-	//pack images
-	for (unsigned img = 0; img < imgLoadQueue.size(); ++img) {
-
-		SpriteData sd = imgLoadQueue.at(img);
-		unsigned b = animLoadQueue.size() + img;
-		bool fitFound = false;
-		for (auto tex = spriteTextures.begin(); tex != spriteTextures.end() && !fitFound; ++tex) {
-			//pack in first open slot
-			if (tex->w == sd.imgW && tex->h == sd.imgH && tex->openSlots > 0) {
-				fitFound = true;
-				glBindTexture(GL_TEXTURE_2D_ARRAY, tex->texID);
-				glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, tex->filled, sd.imgW, sd.imgH, 1,
-					GL_RGBA, GL_UNSIGNED_BYTE, buffers[b]);
-				sd.texID = tex->texID;
-				sd.texOff = tex->filled;
-				tex->filled += 1;
-				tex->openSlots -= 1;
-				spritesLoaded.push_back(sd);
-			}
-		}
-	}
-
-	//clear
-	for (unsigned i = 0; i < animLoadQueue.size() + imgLoadQueue.size(); ++i) {
-		if (buffers[i]) delete[] buffers[i];
-	}
-	delete[] buffers;
-	imgLoadQueue.clear();
-	animLoadQueue.clear();
+	return 0;
 }
 
-void Display::_loadImage(SpriteData* data, GLuint** buff) {
-	bool loaded = true;
+void Display::_clearLoadQ() {
+	unsigned sz = loadQueue.size();
+	for (unsigned i = 0; i < sz; ++i) {
+		SpriteData& sd = loadQueue.at(i);
+		if (sd._pixels) delete[] sd._pixels;
+	}
+	loadQueue.clear();
+}
+
+void Display::_loadSprite(SpriteData* data) {
+	if (data->_pixels) return;		//buffer already loaded
+
 	cimg_library::CImg<uint8_t> image(data->path.c_str());
 
-	//fill big buffer
+	//fill buffer
 	data->imgW = image.width();
 	data->imgH = image.height();
-	data->frW = data->imgW;
-	data->frH = data->imgH;
-	*buff = new GLuint[data->imgW * data->imgH];
+
+	data->_pixels = new GLuint[data->imgW * data->imgH];
 
 	for (int y = 0; y < data->imgH; ++y) {
 		for (int x = 0; x < data->imgW; ++x) {
@@ -823,66 +895,33 @@ void Display::_loadImage(SpriteData* data, GLuint** buff) {
 			p[2] = image(x, invY, 0, 2);
 			p[3] = (p[0] == 255 && p[1] == 0 && p[2] == 255) ? 0 : 255;
 
-			*buff[idx] = pix;
+			data->_pixels[idx] = pix;
 		}
 	}
 
 }
 
-void Display::_loadAnim(SpriteData *data, GLuint** buff) {
-	cimg_library::CImg<uint8_t> image(data->path.c_str());
+void Display::_flipImage(GLuint* buff, unsigned w, unsigned h) {
+	if (!buff || !w || !h) return;
 
-	//fill big buffer
-	data->imgW = image.width();
-	data->imgH = image.height();
-	if (data->imgW % data->frW != 0 || data->imgH % data->frH != 0) {
-		*buff = nullptr;
-		data->imgW = data->imgH = data->frW = data->frH = 0;
-		return;
-	}
-	unsigned wInFrames = (data->imgW / data->frW);
-	unsigned hInFrames = (data->imgH / data->frH);
-	unsigned nFrames = wInFrames * hInFrames;
-	*buff = new GLuint[data->imgW * data->imgH];
-	
-	//for each frame
-	for (int n = 0; n < nFrames; ++n) {
+	for (unsigned y = 0; y < h/2; ++y) {
+		for (unsigned x = 0; x < w; ++x) {
+			int invY = h - 1 - y;
+			int idx = y * w + x;
+			int invIdx = invY * w + x;
 
-		//get index
-		unsigned frameX = (n % wInFrames);
-		unsigned frameY = (n / wInFrames);
-		unsigned xoff = frameX * data->frW;
-		unsigned yoff = frameY * data->frH;
-
-		//load tile into buffer
-		for (int y = yoff; y < yoff + data->frH; ++y) {
-			for (int x = xoff; x < xoff + data->frW; ++x) {
-				int idx = (n * data->frW * data->frH) + ((y - yoff) * data->frW + (x - xoff));
-
-				GLuint pix;
-				uint8_t* p = (uint8_t*)&pix;
-				int invY = yoff + data->frH - 1 - (y - yoff);
-				p[0] = image(x, invY, 0, 0);
-				p[1] = image(x, invY, 0, 1);
-				p[2] = image(x, invY, 0, 2);
-				p[3] = (p[0] == 255 && p[1] == 0 && p[2] == 255) ? 0 : 255;
-
-				*buff[idx] = pix;
-			}
+			unsigned temp = buff[idx];
+			buff[idx] = buff[invIdx];
+			buff[invIdx] = temp;
 		}
 	}
-
 }
 
 bool Display::_isRegistered(std::string file) {
 	bool r = false;
-	for (auto i = imgLoadQueue.begin(); i != imgLoadQueue.end() && !r; ++i) {
+	for (auto i = loadQueue.begin(); i != loadQueue.end() && !r; ++i) {
 		if (i->path.compare(file) == 0) r = true;
 	}
-	for (auto i = animLoadQueue.begin(); i != animLoadQueue.end() && !r; ++i) {
-		if (i->path.compare(file) == 0) r = true;
-	}
-
 	return r;
 }
 
@@ -891,6 +930,16 @@ bool Display::_isLoaded(std::string file) {
 	for (auto i = spritesLoaded.begin(); i != spritesLoaded.end() && !r; ++i) {
 		if (i->path.compare(file) == 0) r = true;
 	}
-
 	return r;
+}
+
+void Display::_updateThings() {
+	//check if we have a new set of things to render
+	
+	//if so, load new vertex attribute data
+
+}
+
+void Display::_loadThings() {
+
 }

@@ -2,17 +2,16 @@
 
 layout(std140, binding = 0) uniform MapProperties
 {								//byte offset
-	mat4 projection;			//0
-	mat4 view;					//64
-	mat4 projview;				//128
-	uint numTiles;				//192
-	uint tileDims;				//196	
-	uint halfTile;				//200
-	uint mapW;					//204
-	uint xoff;					//208
-	uint yoff;					//212
-	vec3 layerVisible;			//224
-	vec3 pad;					//240
+	mat4 projview;				//0
+	mat4 projection;			//64
+	uint numTiles;				//128
+	uint tileDims;				//132	
+	uint halfTile;				//136
+	uint mapW;					//140
+	uint xoff;					//144
+	uint yoff;					//148
+	vec3 layerVisible;			//160
+	vec3 pad;					//176
 } md;
 
 struct TileCoords 

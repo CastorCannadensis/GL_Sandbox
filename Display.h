@@ -12,13 +12,12 @@ enum {
 	TILE_PROPS_BUFFER,
 	MAP_PROPS_BUFFER,
 	THING_PROPS_BUFFER,
-	SAMPLER_BUFFER,
 	NUM_BUFFERS
 };
 enum {
 	TILESHEET_TEX,
-	COLORS_TEX,
-	NUM_BAKEDIN_TEXTURES
+	ATLAS_TEX,
+	NUM_TEXTURES
 };
 enum {
 	FLIP_HOR,
@@ -55,6 +54,8 @@ public:
 	void resize();
 	void render();
 
+	int packTextures();
+
 private:
 	void _loadPrograms();
 	GLuint _loadShader(GLenum type, std::string f);
@@ -66,21 +67,28 @@ private:
 
 	void _setup();
 	void _performanceTest();
+	void _spriteLoadingTest();
+	void _debugTexDump();
 
 	void _updateChunks();
 	void _setChunkSize(unsigned sz);
-	void _orientTiles(uint8_t orient);
 
 		//Thing helpers
-	int _registerImg(std::string file);
-	int _registerAnim(std::string file, unsigned fw, unsigned fh);
-	void _packTextures();
+	int _allocateAtlas(unsigned layers, bool preserve);
 
-	void _loadImage(SpriteData* data, GLuint** buff);
-	void _loadAnim(SpriteData* data, GLuint** buff);
+	int _registerSprite(std::string file, uint16_t fw = 0, uint16_t fh = 0);
+	int _packTextures();
+	void _clearLoadQ();
 
+	void _loadSprite(SpriteData* data);
+	void _flipImage(GLuint* buff, unsigned w, unsigned h);
+	
 	bool _isRegistered(std::string file);
 	bool _isLoaded(std::string file);
+
+	void _updateThings();
+	void _loadThings();
+
 
 	bool panning;
 	wxPoint lastPos;
@@ -89,10 +97,9 @@ private:
 	GLuint programs[2];
 	GLuint vaos[2];
 	GLuint buffers[NUM_BUFFERS];
-	GLuint textures[NUM_BAKEDIN_TEXTURES];
+	GLuint textures[NUM_TEXTURES];
 	GLuint queries[32];
 
-	int maxSimTex;		//simultaneous texture bindings
 	int maxTexSize;
 	int maxTexLayers;	//2D texture array layer limit
 
@@ -109,10 +116,12 @@ private:
 	uint16_t* solids;					//0 = no solid, 1 = solid
 
 	//Thing data
-	std::vector<SpriteData> imgLoadQueue;
-	std::vector<SpriteData> animLoadQueue;
+	AtlasData atlas;
+
+	std::vector<ThingData> things;
+
+	std::vector<SpriteData> loadQueue;
 	std::vector<SpriteData> spritesLoaded;
-	std::vector<TexData> spriteTextures;
 
 	Clock clock;
 	wxGLContext context;

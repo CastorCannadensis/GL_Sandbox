@@ -67,28 +67,39 @@ struct MapData {
 
 struct SpriteData {
 	SpriteData();
-	SpriteData(std::string file);
-	SpriteData(std::string file, uint16_t fw, uint16_t fh);
+	SpriteData(std::string file, uint16_t fw = 0, uint16_t fh = 0);
 	SpriteData(const SpriteData& sd);
 	SpriteData& operator=(const SpriteData& sd);
 
 	std::string path;
 	uint16_t imgW, imgH;
 	uint16_t frW, frH;
-	unsigned texID;
-	uint16_t binding;
-	uint16_t texOff;
+	uint16_t xoff, yoff;
+	uint8_t layer;
+
+	unsigned* _pixels;
 };
 
-struct TexData {
-	TexData();
-	TexData(unsigned id, uint16_t ww, uint16_t hh, uint16_t f, uint16_t slots);
-	TexData(const TexData& td);
-	TexData& operator=(const TexData& td);
-
-	unsigned texID;
+struct ThingData {
+	float x, y, rot;
 	uint16_t w, h;
-	uint16_t filled, openSlots;
+	uint8_t hud, layer;
+	vec2 tCoords[4];
+};
+
+struct AtlasData {
+	AtlasData();
+	AtlasData(const AtlasData& ad);
+	AtlasData& operator=(const AtlasData& ad);
+
+	const unsigned long maxBytes = 1024 * 1024 * 1024;
+
+	unsigned long imgBytes;		//bytes of image data currently loaded into the atlas
+	unsigned long usedBytes;	//amount of atlas space currently filled
+	unsigned long freeBytes;	//area of free atlas space remaining
+	unsigned layers;			//number of layers
+	unsigned ypos;				//y pos of the next available row in the current atlas layer
+	unsigned lpos;				//index of the current atlas layer (the one to be filled next)
 };
 
 vec2 operator+(const vec2& l, const vec2& r);
@@ -101,5 +112,7 @@ bool operator==(const uvec2& l, const uvec2& r);
 bool operator!=(const uvec2& l, const uvec2& r);
 bool operator<(const uvec2& l, const uvec2& r);
 mat4 operator*(const mat4& l, const mat4& r);
+bool spriteDataCompH(const SpriteData& l, const SpriteData& r);
+bool spriteDataCompName(const SpriteData& l, const SpriteData& r);
 
 #endif

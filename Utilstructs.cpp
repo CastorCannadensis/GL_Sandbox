@@ -64,30 +64,31 @@ const vec4& mat4::operator[](std::size_t n) const {
 	return *ret;
 }
 
-SpriteData::SpriteData() : path(""), imgW(0), imgH(0), frW(0), frH(0), texID(0), binding(0), texOff(0) { }
-SpriteData::SpriteData(std::string file) : path(file), imgW(0), imgH(0), frW(0), frH(0), texID(0), binding(0), texOff(0) { }
-SpriteData::SpriteData(std::string file, uint16_t fw, uint16_t fh) : path(file), imgW(0), imgH(0), frW(fw), frH(fh), texID(0), binding(0), texOff(0) { }
-SpriteData::SpriteData(const SpriteData& sd) : path(sd.path), imgW(sd.imgW), imgH(sd.imgH), frW(sd.frW), frH(sd.frH), texID(sd.texID), binding(sd.binding), texOff(sd.texOff) { }
+SpriteData::SpriteData() : path(""), imgW(0), imgH(0), frW(0), frH(0), xoff(0), yoff(0), layer(0), _pixels(nullptr) { }
+SpriteData::SpriteData(std::string file, uint16_t fw, uint16_t fh) : path(file), imgW(0), imgH(0), frW(fw), frH(fh), xoff(0), yoff(0), layer(0), _pixels(nullptr) { }
+SpriteData::SpriteData(const SpriteData& sd) : path(sd.path), imgW(sd.imgW), imgH(sd.imgH), frW(sd.frW), frH(sd.frH), xoff(sd.xoff), yoff(sd.yoff), layer(sd.layer), _pixels(sd._pixels) { }
 SpriteData &SpriteData::operator=(const SpriteData& sd) {
 	path = sd.path;
 	imgW = sd.imgW;
 	imgH = sd.imgH;
 	frW = sd.frW;
 	frH = sd.frH;
-	texID = sd.texID;
-	binding = sd.binding;
-	texOff = sd.texOff;
+	xoff = sd.xoff;
+	yoff = sd.yoff;
+	layer = sd.layer;
+	_pixels = sd._pixels;
 	return *this;
 }
 
-TexData::TexData() : texID(0), w(0), h(0), filled(0), openSlots(0) { }
-TexData::TexData(unsigned id, uint16_t ww, uint16_t hh, uint16_t f, uint16_t slots) : texID(id), w(ww), h(hh), filled(f), openSlots(slots) { }
-TexData::TexData(const TexData& td) : texID(td.texID), w(td.w), h(td.h), filled(td.filled), openSlots(td.openSlots) { }
-TexData& TexData::operator=(const TexData& td) {
-	texID = td.texID;
-	w = td.w;	h = td.h;
-	filled = td.filled;
-	openSlots = td.openSlots;
+AtlasData::AtlasData() : imgBytes(0), usedBytes(0), freeBytes(0), layers(0), ypos(0), lpos(0) { }
+AtlasData::AtlasData(const AtlasData& ad) : imgBytes(ad.imgBytes), usedBytes(ad.usedBytes), freeBytes(ad.freeBytes), layers(ad.layers), ypos(ad.ypos), lpos(ad.lpos) { }
+AtlasData& AtlasData::operator=(const AtlasData& ad) {
+	imgBytes = ad.imgBytes;
+	usedBytes = ad.usedBytes;
+	freeBytes = ad.freeBytes;
+	layers = ad.layers;
+	ypos = ad.ypos;
+	lpos = ad.lpos;
 	return *this;
 }
 
@@ -157,4 +158,12 @@ mat4 operator*(const mat4& l, const mat4& r) {
 	}
 
 	return ret;
+}
+
+bool spriteDataCompH(const SpriteData& l, const SpriteData& r) {
+	return l.imgH > r.imgH;
+}
+
+bool spriteDataCompName(const SpriteData& l, const SpriteData& r) {
+	return l.path < r.path;
 }
